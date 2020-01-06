@@ -1,80 +1,61 @@
+mod server;
+mod encode;
+mod oauth;
+
 use std::env;
-use std::time::{SystemTime, UNIX_EPOCH};
-// use std::convert::Infallible;
-// use std::net::SocketAddr;
+use std::result::Result;
 
 use dotenv;
-use anyhow;
-use rand::{thread_rng, Rng};
-use rand::distributions::Alphanumeric;
 
-// use hyper::{Body, Request, Response, Server};
-// use hyper::service::{make_service_fn, service_fn};
+const REQUEST_TOKEN_URL: &str = "https://api.twitter.com/oauth/request_token";
+const AUTH_URL: &str = "https://api.twitter.com/oauth/authorize";
+const ACCESS_TOKEN_URL: &str = "https://api.twitter.com/oauth/access_token";
+const REDIRECT_URL: &str = "http://127.0.0.1:3000/oauth_response";
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), anyhow::Error> {
     dotenv::dotenv().ok();
 
-    let client_id = env::var("CLIENT_ID").expect("CLIENT_ID was not found in the environment");
-    let client_secret = env::var("CLIENT_SECRET").expect("CLIENT_SECRET was not found in the environment");
+    let oauth_consumer_key = env::var("CONSUMER_KEY").expect("CONSUMER_KEY was not found in the environment");
+    let oauth_consumer_key = oauth_consumer_key.as_str();
+    let oauth_consumer_secret = env::var("CONSUMER_SECRET").expect("CONSUMER_SECRET was not found in the environment");
+    let oauth_consumer_secret = oauth_consumer_secret.as_str();
 
-    println!("CID: {}, CS: {}", client_id, client_secret);
+    let request_token = oauth::get_request_token(
+        REQUEST_TOKEN_URL,
+        oauth_consumer_key,
+        oauth_consumer_secret,
+        REDIRECT_URL
+    ).await?;
 
-    let request_token_url = "https://api.twitter.com/oauth/request_token";
-    let auth_url = "https://api.twitter.com/oauth/authorize";
-    let token_url = "https://api.twitter.com/oauth/access_token";
-    let redirect_url = "http://127.0.0.1:3000";
-    let redirect_url_encoded = "http%3A%2F%2F127.0.0.1%3A3000%2Foauth%2Freceive";
+    println!("Visit https://api.twitter.com/oauth/authorize?oauth_token={} to authorize this app", request_token);
 
-    let rng = thread_rng();
-    let auth_nonce: String = rng.sample_iter(Alphanumeric).take(50).collect();
-    println!("Auth nonce: {}", auth_nonce);
+    let (oauth_token, oauth_verifier) = oauth::block_and_wait_for_temp_access_token();
 
-    let oauth_signature = "";
-    let oauth_signature_method = "HMAC-SHA1";
-    let oauth_timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
+    println!("Received oauth_token: {} and oauth_verifier {}", oauth_token, oauth_verifier);
 
-    println!("timestamp: {}", oauth_timestamp);
+    let (oauth_access_token, oauth_access_token_secret, user_id, screen_name) = oauth::exchange_temp_access_tokens_for_access_token(
+        ACCESS_TOKEN_URL,
+        oauth_consumer_key,
+        oauth_token.as_str(),
+        oauth_verifier.as_str()
+    ).await?;
 
-    let params = [("oauth_consumer_key", client_id), ("oauth_callback", redirect_url_encoded.to_string())];
-    let client = reqwest::Client::new();
-    let res = client.post(request_token_url)
-        .form(&params)
-        .send()
-        .await?
-        .text()
-        .await?;
+    println!("OAuth Token: {}, OAuth Token Secret: {}, User ID: {}, Screen Name: {}", oauth_access_token, oauth_access_token_secret, user_id, screen_name);
 
-    println!("Res: {:?}", res);
+    let filter_body = oauth::make_authorized_request(
+        "GET",
+        "https://api.twitter.com/1.1/statuses/home_timeline.json",
+        oauth_consumer_key,
+        oauth_consumer_secret,
+        oauth_access_token.as_str(),
+        oauth_access_token_secret.as_str(),
+        vec![]
+    ).await?;
+
+    println!("Filter body: {}", filter_body);
 
     Ok(())
-
-    /*
-    // We'll bind to 127.0.0.1:3000
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-
-    // A `Service` is needed for every connection, so this
-    // creates one from our `hello_world` function.
-    let make_svc = make_service_fn(|_conn| async {
-        // service_fn converts our function into a `Service`
-        Ok::<_, Infallible>(service_fn(hello_world))
-    });
-
-    let server = Server::bind(&addr).serve(make_svc);
-
-    // Run this server for... forever!
-    println!("Server listening on {}", addr.to_string());
-    if let Err(e) = server.await {
-        eprintln!("server error: {}", e);
-    }
-    */
 }
 
-/*
-async fn hello_world(_req: Request<Body>) -> Result<Response<Body>, Infallible> {
-    Ok(Response::new("Hello, World".into()))
-}
-*/
+
